@@ -1,0 +1,10 @@
+# Ignore Python virtual environment
+.venv/
+
+# Ignore compressed files
+*.zip
+*.compressed
+
+# Ignore pickle files
+*.pkl
+*.csv
