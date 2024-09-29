@@ -1,95 +1,98 @@
+import joblib
+import pandas as pd
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import pickle
-import pandas as pd
 import numpy as np
-from typing import List
-from datetime import datetime
-import uvicorn
+import tensorflow as tf
+from sklearn.preprocessing import MinMaxScaler
 
-# Define the FastAPI app
+# Load the trained models and scaler
+rf_model_path = r"C:\Users\hayyu.ragea\AppData\Local\Programs\Python\Python312\Rossmann_Sales_Forecasting_Project\models\saved_models\random_forest_model_28-09-2024-14-14-04.pkl"
+lstm_model_path = r"C:\Users\hayyu.ragea\AppData\Local\Programs\Python\Python312\Rossmann_Sales_Forecasting_Project\models\saved_models\lstm_model_28-09-2024-14-14-04.h5"
+scaler_path = r"C:\Users\hayyu.ragea\AppData\Local\Programs\Python\Python312\Rossmann_Sales_Forecasting_Project\models\saved_models\minmax_scaler_28-09-2024-14-14-04.pkl"
+
+# Load the Random Forest model and scaler
+rf_model = joblib.load(rf_model_path)
+scaler = joblib.load(scaler_path)
+
+# Load the LSTM model using TensorFlow/Keras
+lstm_model = tf.keras.models.load_model(lstm_model_path)
+
+# Initialize the MinMaxScaler for LSTM scaling (ensure it’s defined here)
+scaler_lstm = joblib.load(scaler_path)  # Adjust this line if you're loading a specific LSTM scaler
+
+# Initialize FastAPI
 app = FastAPI()
 
-# Define the input data model for the API (for data validation)
-class SalesData(BaseModel):
+# Define request body for predictions
+class SalesPredictionRequest(BaseModel):
     Store: int
-    DayOfWeek: int
-    Date: str
-    Open: int
-    Promo: int
-    StateHoliday: str
-    SchoolHoliday: int
-    StoreType: str
-    Assortment: str
-    CompetitionDistance: float
-    CompetitionOpenSinceMonth: int
-    CompetitionOpenSinceYear: int
-    Promo2: int
-    Promo2SinceWeek: int
-    Promo2SinceYear: int
-    PromoInterval: str
+    Day: int
+    Month: int
+    Year: int
+    Weekday: int
+    Weekend: int
+    IsMonthStart: int
+    IsMonthEnd: int
+    DaysToHoliday: int
+    StateHoliday: str  # Add StateHoliday to the request for flexibility
 
-# Load the trained machine learning model
-model_path = "models/saved_models/sales_forecasting_model.pkl"
-
-def load_model(model_path: str):
-    with open(model_path, "rb") as file:
-        model = pickle.load(file)
-    return model
-
-# Load the serialized model
-try:
-    model = load_model(model_path)
-except Exception as e:
-    raise HTTPException(status_code=500, detail=f"Error loading model: {e}")
-
-# Function to preprocess input data
-def preprocess_input(data: SalesData):
-    # Convert date string to datetime object
-    data.Date = pd.to_datetime(data.Date)
-
-    # Example of more preprocessing steps:
-    # Convert categorical features to numeric (you can add more preprocessing based on your feature engineering)
-    data.StateHoliday = 0 if data.StateHoliday == '0' else 1
-    data.StoreType = 1 if data.StoreType == 'a' else (2 if data.StoreType == 'b' else (3 if data.StoreType == 'c' else 4))
-    data.Assortment = 1 if data.Assortment == 'a' else (2 if data.Assortment == 'b' else 3)
-    data.PromoInterval = 1 if data.PromoInterval in ['Feb', 'May', 'Aug', 'Nov'] else 0
-
-    # Return the processed input as a numpy array
-    processed_input = np.array([
-        data.Store, data.DayOfWeek, data.Open, data.Promo,
-        data.StateHoliday, data.SchoolHoliday, data.StoreType,
-        data.Assortment, data.CompetitionDistance, data.CompetitionOpenSinceMonth,
-        data.CompetitionOpenSinceYear, data.Promo2, data.Promo2SinceWeek,
-        data.Promo2SinceYear, data.PromoInterval
-    ]).reshape(1, -1)
-
-    return processed_input
-
-# Root endpoint to check if API is working
-@app.get("/")
-def read_root():
-    return {"message": "Welcome to the Rossmann Sales Forecasting API"}
-
-# Prediction endpoint
-@app.post("/predict/")
-def predict_sales(sales_data: SalesData):
+# Define a prediction endpoint for Random Forest
+@app.post("/predict_rf/")
+async def predict_rf(request: SalesPredictionRequest):
     try:
-        # Preprocess input data
-        input_data = preprocess_input(sales_data)
-
-        # Make prediction using the loaded model
-        prediction = model.predict(input_data)
-        prediction_value = float(prediction[0])
-
-        # Return the prediction result
-        return {
-            "prediction": prediction_value,
-            "message": "Sales prediction successful"
-        }
+        # Prepare input data as DataFrame
+        input_data = pd.DataFrame([request.dict()])
+        input_data.fillna(0, inplace=True)  # Fill NaNs as in preprocessing
+        prediction = rf_model.predict(input_data)
+        return {"predicted_sales": prediction[0]}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error making prediction: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
 
-# For testing locally
+# Define a prediction endpoint for LSTM
+@app.post("/predict_lstm/")
+async def predict_lstm(request: SalesPredictionRequest):
+    try:
+        # Prepare input data for LSTM prediction
+        input_data = pd.DataFrame([request.dict()])
+
+        # Define the expected columns for prediction
+        expected_columns = [
+            "Store", "Day", "Month", "Year", "Weekday", 
+            "Weekend", "IsMonthStart", "IsMonthEnd", 
+            "DaysToHoliday", "StateHoliday"
+        ]
+
+        # Check for missing features and ensure the input has all expected features
+        for col in expected_columns:
+            if col not in input_data.columns:
+                raise HTTPException(status_code=400, detail=f"Missing feature: {col}")
+
+        # Reorder columns to match the scaler's expectations
+        input_data = input_data[expected_columns]
+
+        # Fill any NaN values in the input data
+        input_data.fillna(0, inplace=True)  # Fill NaNs as needed
+
+        # Scale the input data using the fitted scaler
+        input_data_scaled = scaler_lstm.transform(input_data)  # Transform input (1, 10)
+
+        # Reshape for LSTM: (samples, time steps, features)
+        input_data_lstm = input_data_scaled.reshape((1, 1, input_data_scaled.shape[1]))
+
+        # Make prediction using the LSTM model
+        prediction = lstm_model.predict(input_data_lstm)
+
+        return {"predicted_sales": prediction[0][0]}
+    
+    except ValueError as ve:
+        # Handle specific value errors from the scaler or model
+        raise HTTPException(status_code=422, detail=str(ve))
+    except Exception as e:
+        # Handle general exceptions
+        raise HTTPException(status_code=400, detail=str(e))
+
+# Run the API using Uvicorn
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8000)
